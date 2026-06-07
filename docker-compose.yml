@@ -9,7 +9,7 @@ services:
       - "5900:5900"   # VNC server (optional direct access)
     volumes:
       - ./storage:/app/storage  # Persistent browser contexts
-      - /tmp:/tmp               # Screenshots and artifacts
+      - ./tmp:/tmp               # Screenshots and artifacts
     env_file:
       - .env
     environment:
@@ -32,8 +32,8 @@ services:
       context: .
       dockerfile: Dockerfile.test
     volumes:
-      - ./storage:/app/storage  # Persistent browser contexts
-      - /tmp:/tmp               # Screenshots and artifacts
+      - test_storage:/app/storage  # Persistent browser contexts
+      - test_tmp:/tmp               # Screenshots and artifacts
     environment:
       - NODE_ENV=test
       - DISPLAY=:99
@@ -75,3 +75,7 @@ services:
 #   drupal_themes:
 #   drupal_sites:
 #   db_data:
+
+volumes:
+  test_storage:
+  test_tmp:

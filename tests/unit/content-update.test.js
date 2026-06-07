@@ -189,6 +189,12 @@ describe('PlaywrightManager - Content Update', () => {
 
       expect(schema).toBeNull();
     });
+
+    test('should return null if content type contains invalid characters (path injection)', async () => {
+      const schema = await manager.loadSchemaForContentType('../something');
+
+      expect(schema).toBeNull();
+    });
   });
 
   describe('updateFormFields', () => {

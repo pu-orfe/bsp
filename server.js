@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const PlaywrightManager = require('./src/playwrightManager');
+const { rateLimit } = require('express-rate-limit');
 const { validateContentRequest } = require('./src/validation');
 
 // Debug flag for server logging
@@ -27,6 +28,28 @@ app.use(cors());
 app.use(morgan('combined'));
 // Add payload size limit (1MB) for security
 app.use(express.json({ limit: '1mb' }));
+
+// Rate limiters for security
+const generalLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  limit: 100, // Limit each IP to 100 requests per windowMs
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === 'test',
+  message: { error: 'Too many requests, please try again later.' }
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  limit: 15, // Limit each IP to 15 auth requests per windowMs
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === 'test',
+  message: { error: 'Too many login attempts, please try again after 15 minutes.' }
+});
+
+// Apply general rate limiting to all requests
+app.use(generalLimiter);
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -75,7 +98,7 @@ app.get('/playwright/ready', async (req, res) => {
 });
 
 // Interactive login - creates fresh browser context for VNC access
-app.post('/login/interactive', async (req, res) => {
+app.post('/login/interactive', authLimiter, async (req, res) => {
   try {
     console.log('Starting interactive login process...');
     
@@ -117,7 +140,7 @@ app.post('/login/interactive', async (req, res) => {
 });
 
 // Check authentication status
-app.get('/login/check', async (req, res) => {
+app.get('/login/check', authLimiter, async (req, res) => {
   try {
     if (!playwrightManager.isReady()) {
       return res.json({
@@ -138,7 +161,7 @@ app.get('/login/check', async (req, res) => {
 });
 
 // Navigate to default login URL programmatically
-app.post('/login/navigate', async (req, res) => {
+app.post('/login/navigate', authLimiter, async (req, res) => {
   try {
     if (!playwrightManager.isReady()) {
       return res.status(400).json({
@@ -169,7 +192,7 @@ app.post('/login/navigate', async (req, res) => {
 });
 
 // Save current authentication state
-app.post('/login/save', async (req, res) => {
+app.post('/login/save', authLimiter, async (req, res) => {
   try {
     if (!playwrightManager.isReady()) {
       return res.status(400).json({
@@ -193,7 +216,7 @@ app.post('/login/save', async (req, res) => {
 });
 
 // Load saved authentication state
-app.post('/login/load', async (req, res) => {
+app.post('/login/load', authLimiter, async (req, res) => {
   try {
     await playwrightManager.close(); // Close any existing session
     const { context, page } = await playwrightManager.loadAuthenticatedContext();

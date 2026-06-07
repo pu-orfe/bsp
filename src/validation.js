@@ -89,7 +89,8 @@ function validateContentRequest(contentType, fields) {
       }
 
       // Check for potential XSS - basic check for script tags
-      if (fieldValue.match(/<script[\s\S]*?>[\s\S]*?<\/script>/gi)) {
+      const lowerValue = fieldValue.toLowerCase();
+      if (lowerValue.includes('<script') || lowerValue.includes('</script')) {
         return {
           valid: false,
           error: `Field "${fieldName}" contains potentially malicious content`,
