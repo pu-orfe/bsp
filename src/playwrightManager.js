@@ -1407,7 +1407,11 @@ class PlaywrightManager {
       if (typeof contentType !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(contentType)) {
         return null;
       }
-      const schemaPath = path.join(process.cwd(), 'schemas', `${contentType}.json`);
+      const targetDir = path.resolve(process.cwd(), 'schemas');
+      const schemaPath = path.resolve(targetDir, `${contentType}.json`);
+      if (!schemaPath.startsWith(targetDir)) {
+        return null;
+      }
       const schemaContent = await fs.readFile(schemaPath, 'utf8');
       return JSON.parse(schemaContent);
     } catch (error) {
