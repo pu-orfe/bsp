@@ -1,5 +1,5 @@
 # Multi-stage build for Drupal UI automation platform
-FROM node:25-bullseye as base
+FROM node:26-bullseye as base
 
 # Install system dependencies for headful browser and VNC
 RUN apt-get update && apt-get install -y \
