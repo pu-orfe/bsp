@@ -1,5 +1,5 @@
 # Test-specific Dockerfile that installs devDependencies
-FROM node:26-bullseye as base
+FROM node:26-bookworm AS base
 
 # Install system dependencies for headful browser and VNC
 RUN apt-get update && apt-get install -y \
@@ -72,7 +72,7 @@ RUN for i in 1 2 3; do \
     fi
 
 # Test stage
-FROM base as test
+FROM base AS test
 
 # Copy application code
 COPY . .

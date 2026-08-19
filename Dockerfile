@@ -1,5 +1,5 @@
 # Multi-stage build for Drupal UI automation platform
-FROM node:26-bullseye as base
+FROM node:26-bookworm AS base
 
 # Install system dependencies for headful browser and VNC
 RUN apt-get update && apt-get install -y \
@@ -42,7 +42,7 @@ RUN npm ci --only=production
 RUN npx playwright install --with-deps chromium
 
 # Production stage
-FROM base as production
+FROM base AS production
 
 # Copy application code
 COPY . .

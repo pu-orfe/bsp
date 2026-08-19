@@ -1,0 +1,22 @@
+# Dependencies are installed inside the image via `npm ci`; copying the host
+# tree over them can mismatch Playwright's expected browser revision.
+node_modules/
+npm-debug.log*
+
+# Local secrets and state
+.env
+.env.*
+!.env.example
+storage/
+tmp/
+*.log
+
+# VCS and tooling
+.git/
+.github/
+.gitignore
+.claude/
+
+# OS noise
+.DS_Store
+._*
