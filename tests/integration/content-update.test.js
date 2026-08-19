@@ -4,12 +4,6 @@ const app = require('../../server');
 jest.setTimeout(60000);
 
 describe('Content Update API Tests', () => {
-  // Skip tests in CI environments
-  if (process.env.CI) {
-    console.log('Skipping content update tests in CI environment');
-    return;
-  }
-
   let testApp;
 
   beforeAll(async () => {

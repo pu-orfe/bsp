@@ -10,12 +10,6 @@ const isInContainer = process.env.NODE_ENV === 'test';
 const testTarget = isInContainer ? app : app; // Always use the app directly
 
 describe('Browser Auto-Launch and Navigation Tests', () => {
-  // Skip all browser behavior tests in CI environments where browser launch may be unreliable
-  if (process.env.CI) {
-    console.log('Skipping browser behavior tests in CI environment');
-    return;
-  }
-
   let testApp;
 
   beforeAll(async () => {

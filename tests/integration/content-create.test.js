@@ -4,12 +4,6 @@ const app = require('../../server');
 jest.setTimeout(60000);
 
 describe('Content Creation API Tests', () => {
-  // Skip tests in CI environments
-  if (process.env.CI) {
-    console.log('Skipping content creation tests in CI environment');
-    return;
-  }
-
   let testApp;
 
   beforeAll(async () => {

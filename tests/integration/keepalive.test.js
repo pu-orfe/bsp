@@ -7,12 +7,6 @@ jest.setTimeout(60000);
 const isInContainer = process.env.NODE_ENV === 'test';
 
 describe('Keepalive API Tests', () => {
-  // Skip all keepalive tests in CI environments where browser launch may be unreliable
-  if (process.env.CI) {
-    console.log('Skipping keepalive tests in CI environment');
-    return;
-  }
-
   let testApp;
 
   beforeAll(async () => {
