@@ -12,8 +12,21 @@ const TIMEOUTS = {
   NAVIGATION: 30000,        // Page navigation timeout
   FORM_LOAD: 10000,         // Form element load timeout
   DOM_CONTENT_LOADED: 5000, // DOM content loaded timeout
-  NETWORK_IDLE: 30000       // Network idle timeout
+  NETWORK_IDLE: 30000,      // Network idle timeout
+  SHUTDOWN: 10000           // Per-resource limit when tearing the browser down
 };
+
+// Bound a shutdown step so a wedged browser process cannot hang close()
+// forever. Callers drop the resource reference either way, and the surviving
+// OS process is reaped by the container/test teardown.
+function withTimeout(promise, ms, label) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not finish within ${ms}ms`)), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
 
 // Input validation constants
 const VALIDATION = {
@@ -831,32 +844,35 @@ class PlaywrightManager {
 
     try {
       if (this.page) {
-        await this.page.close();
-        this.page = null;
+        await withTimeout(this.page.close(), TIMEOUTS.SHUTDOWN, 'Page close');
         console.log('Page closed');
       }
     } catch (error) {
       console.error('Error closing page:', error.message);
+    } finally {
+      this.page = null;
     }
 
     try {
       if (this.context) {
-        await this.context.close();
-        this.context = null;
+        await withTimeout(this.context.close(), TIMEOUTS.SHUTDOWN, 'Context close');
         console.log('Context closed');
       }
     } catch (error) {
       console.error('Error closing context:', error.message);
+    } finally {
+      this.context = null;
     }
 
     try {
       if (this.browser) {
-        await this.browser.close();
-        this.browser = null;
+        await withTimeout(this.browser.close(), TIMEOUTS.SHUTDOWN, 'Browser close');
         console.log('Browser closed');
       }
     } catch (error) {
       console.error('Error closing browser:', error.message);
+    } finally {
+      this.browser = null;
     }
 
     console.log('PlaywrightManager cleanup completed');
