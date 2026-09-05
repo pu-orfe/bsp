@@ -606,6 +606,134 @@ app.get('/content', async (req, res) => {
   }
 });
 
+// --- Layout Builder ---
+//
+// Layout Builder stages edits in a per-user tempstore. Block updates are
+// therefore staged by default and only go live once the layout is saved,
+// which lets a caller batch many block edits into a single publish.
+
+// Validate the identifiers Layout Builder uses to address a block
+function validateBlockAddress({ nodeId, delta, region, uuid }) {
+  if (!/^\d+$/.test(String(nodeId))) return 'nodeId must be numeric';
+  if (!/^\d+$/.test(String(delta))) return 'delta must be numeric';
+  if (!/^[a-zA-Z0-9_-]+$/.test(String(region))) return 'region contains invalid characters';
+  if (!/^[0-9a-fA-F-]{36}$/.test(String(uuid))) return 'uuid must be a UUID';
+  return null;
+}
+
+function requireSession(res) {
+  if (!playwrightManager.isReady()) {
+    res.status(400).json({
+      success: false,
+      error: 'No active browser session. Call /login/interactive first.'
+    });
+    return false;
+  }
+  return true;
+}
+
+// List the blocks placed in a node's layout
+app.get('/layout/:nodeId/blocks', async (req, res) => {
+  try {
+    if (!requireSession(res)) return;
+
+    const { nodeId } = req.params;
+    if (!/^\d+$/.test(nodeId)) {
+      return res.status(400).json({ success: false, error: 'nodeId must be numeric' });
+    }
+
+    const withFields = req.query.fields === 'true';
+    const result = await playwrightManager.queryLayoutBlocks(nodeId, { withFields });
+    res.json(result);
+  } catch (error) {
+    console.error('Layout blocks query error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Read one block's configure form
+app.get('/layout/:nodeId/block/:delta/:region/:uuid', async (req, res) => {
+  try {
+    if (!requireSession(res)) return;
+
+    const { nodeId, delta, region, uuid } = req.params;
+    const invalid = validateBlockAddress(req.params);
+    if (invalid) {
+      return res.status(400).json({ success: false, error: invalid });
+    }
+
+    const result = await playwrightManager.getLayoutBlockDetail(nodeId, delta, region, uuid);
+    res.json(result);
+  } catch (error) {
+    console.error('Layout block detail error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Update one block's configuration (staged unless ?save=true)
+app.put('/layout/:nodeId/block/:delta/:region/:uuid', async (req, res) => {
+  try {
+    if (!requireSession(res)) return;
+
+    const { nodeId, delta, region, uuid } = req.params;
+    const invalid = validateBlockAddress(req.params);
+    if (invalid) {
+      return res.status(400).json({ success: false, error: invalid });
+    }
+
+    const updates = req.body;
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates) || Object.keys(updates).length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Request body must be a non-empty object of field name/value pairs'
+      });
+    }
+
+    const save = req.query.save === 'true';
+    const result = await playwrightManager.updateLayoutBlock(nodeId, delta, region, uuid, updates, { save });
+    res.json(result);
+  } catch (error) {
+    console.error('Layout block update error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Persist staged layout changes
+app.post('/layout/:nodeId/save', async (req, res) => {
+  try {
+    if (!requireSession(res)) return;
+
+    const { nodeId } = req.params;
+    if (!/^\d+$/.test(nodeId)) {
+      return res.status(400).json({ success: false, error: 'nodeId must be numeric' });
+    }
+
+    const result = await playwrightManager.saveLayout(nodeId);
+    res.json(result);
+  } catch (error) {
+    console.error('Layout save error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Drop staged layout changes
+app.post('/layout/:nodeId/discard', async (req, res) => {
+  try {
+    if (!requireSession(res)) return;
+
+    const { nodeId } = req.params;
+    if (!/^\d+$/.test(nodeId)) {
+      return res.status(400).json({ success: false, error: 'nodeId must be numeric' });
+    }
+
+    const result = await playwrightManager.discardLayoutChanges(nodeId);
+    res.json(result);
+  } catch (error) {
+    console.error('Layout discard error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Test cleanup endpoint - closes any running browser sessions
 app.post('/test/cleanup', async (req, res) => {
   try {

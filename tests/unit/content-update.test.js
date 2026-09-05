@@ -20,6 +20,8 @@ describe('PlaywrightManager - Content Update', () => {
         selectOption: jest.fn().mockResolvedValue(undefined),
         click: jest.fn().mockResolvedValue(undefined),
         getAttribute: jest.fn().mockResolvedValue('text'),
+        // Real locators expose evaluate(); field-type inference uses it
+        evaluate: jest.fn().mockResolvedValue('input'),
         first: jest.fn()
       };
       locator.first.mockImplementation(() => createMockLocator());
@@ -135,6 +137,30 @@ describe('PlaywrightManager - Content Update', () => {
 
       expect(result.updatedFields).toBeDefined();
       expect(Array.isArray(result.updatedFields)).toBe(true);
+    });
+
+    test('does not submit the form when no field could be updated', async () => {
+      mockPage.url.mockReturnValue('https://example.com/node/123/edit');
+      // Nothing on the page matches any selector
+      mockLocator.count.mockResolvedValue(0);
+
+      const result = await manager.updateContent(123, { nonexistent_field: 'value' });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/form not submitted/);
+      expect(result.updatedFields).toEqual([]);
+      expect(result.skippedFields).toHaveLength(1);
+      // The Save button must never be clicked for a no-op update
+      expect(mockLocator.click).not.toHaveBeenCalled();
+    });
+
+    test('reports the reason each field was skipped when nothing applied', async () => {
+      mockPage.url.mockReturnValue('https://example.com/node/123/edit');
+      mockLocator.count.mockResolvedValue(0);
+
+      const result = await manager.updateContent(123, { missing: 'value' });
+
+      expect(result.skippedFields[0]).toEqual({ field: 'missing', reason: 'Field not found' });
     });
 
     test('should include skipped fields in response', async () => {
