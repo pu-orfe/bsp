@@ -1,0 +1,8 @@
+{
+  "$comment": "Minimal example: a two-column CSV of Title,Body into Drupal core's article type.",
+  "contentType": "article",
+  "fields": {
+    "title": { "template": "{Title}", "required": true },
+    "body": "{Body|}"
+  }
+}
