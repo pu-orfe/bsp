@@ -25,7 +25,7 @@
  * Options:
  *   --node <id>        Node whose layout to edit (required)
  *   --plugin <id>      Only blocks with this block plugin ID (e.g. ps_events_list_conference)
- *   --label <regex>    Only blocks whose admin label matches this regular expression
+ *   --label <text>     Only blocks whose admin label contains this text (case-insensitive)
  *   --uuids <list>     Comma-separated block UUIDs; restricts the run to these blocks
  *   --field <name>     Form field name to set (repeatable, pairs with --value)
  *   --value <text>     Value for the preceding --field (repeatable)
@@ -131,17 +131,34 @@ function parseArgs(argv) {
 // --- selection ---
 
 /**
+ * Test a block label against the --label filter.
+ *
+ * Matching is a case-insensitive substring test rather than a regular
+ * expression: building a RegExp from a command-line argument invites
+ * catastrophic backtracking, and labels are short names where substring
+ * matching is what people actually want. Use --plugin or --uuids when an
+ * exact selection is needed.
+ *
+ * @param {string|null} blockLabel - The block's admin label
+ * @param {string|null} filter - Text from --label
+ * @returns {boolean} True when no filter is set or the label contains it
+ */
+function matchesLabel(blockLabel, filter) {
+  if (!filter) return true;
+  return String(blockLabel || '').toLowerCase().includes(String(filter).toLowerCase());
+}
+
+/**
  * Pick the layout blocks a run should touch.
  * With no filters every block matches, so at least one filter is expected.
  */
 function selectBlocks(blocks, { plugin = null, label = null, uuids = null } = {}) {
   const wanted = uuids ? new Set(uuids) : null;
-  const labelPattern = label ? new RegExp(label) : null;
 
   return blocks.filter(block => {
     if (wanted && !wanted.has(block.uuid)) return false;
     if (plugin && block.pluginId !== plugin) return false;
-    if (labelPattern && !labelPattern.test(block.label || '')) return false;
+    if (!matchesLabel(block.label, label)) return false;
     return true;
   });
 }
@@ -209,7 +226,7 @@ Usage:
 
 Filters:
   --plugin <id>      Only blocks with this block plugin ID
-  --label <regex>    Only blocks whose admin label matches this regular expression
+  --label <text>     Only blocks whose admin label contains this text (case-insensitive)
   --uuids <list>     Comma-separated block UUIDs
 
 Updates:
@@ -254,7 +271,7 @@ async function main() {
   console.log(`Node:    ${options.nodeId}`);
   console.log(`Mode:    ${options.execute && !inspectOnly ? 'EXECUTE (changes will be saved)' : 'DRY RUN (no changes)'}`);
   if (options.plugin) console.log(`Plugin:  ${options.plugin}`);
-  if (options.label) console.log(`Label:   /${options.label}/`);
+  if (options.label) console.log(`Label:   contains "${options.label}"`);
   if (options.uuids) console.log(`UUIDs:   ${options.uuids.join(', ')}`);
   console.log('');
 
@@ -391,6 +408,7 @@ if (require.main === module) {
 
 module.exports = {
   parseArgs,
+  matchesLabel,
   selectBlocks,
   listBlocks,
   readBlock,
