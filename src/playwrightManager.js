@@ -84,6 +84,65 @@ class PlaywrightManager {
     return `${normalizedBase}/${path}`;
   }
 
+  /**
+   * Extra HTTP headers applied to every browser request.
+   *
+   * Some sites sit behind a WAF/bot filter that only lets automated traffic
+   * through when a specific header is present (e.g. Cloudflare bypass headers).
+   * Configure with EXTRA_HTTP_HEADERS as a JSON object, e.g.
+   *   EXTRA_HTTP_HEADERS={"x-wdsoit-bot-bypass":"true"}
+   *
+   * @returns {Object|null} Header map, or null when none are configured/valid
+   */
+  getExtraHTTPHeaders() {
+    const raw = process.env.EXTRA_HTTP_HEADERS;
+    if (!raw || !raw.trim()) {
+      return null;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      console.warn(`Ignoring EXTRA_HTTP_HEADERS: not valid JSON (${error.message})`);
+      return null;
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.warn('Ignoring EXTRA_HTTP_HEADERS: expected a JSON object of header name/value pairs');
+      return null;
+    }
+
+    const headers = {};
+    for (const [name, value] of Object.entries(parsed)) {
+      if (value === null || value === undefined || typeof value === 'object') {
+        console.warn(`Ignoring EXTRA_HTTP_HEADERS entry "${name}": value must be a string, number, or boolean`);
+        continue;
+      }
+      headers[name] = String(value);
+    }
+
+    const names = Object.keys(headers);
+    if (names.length === 0) {
+      return null;
+    }
+
+    // Log names only - header values can be secrets
+    console.log('Applying extra HTTP headers to browser context:', names.join(', '));
+    return headers;
+  }
+
+  /**
+   * Build newContext() options, merging in any configured extra HTTP headers.
+   *
+   * @param {Object} options - Base context options
+   * @returns {Object} Context options including extraHTTPHeaders when configured
+   */
+  buildContextOptions(options = {}) {
+    const extraHTTPHeaders = this.getExtraHTTPHeaders();
+    return extraHTTPHeaders ? { ...options, extraHTTPHeaders } : { ...options };
+  }
+
   async ensureStorageDir() {
     try {
       await fs.access(this.storageDir);
@@ -150,9 +209,9 @@ class PlaywrightManager {
     console.log('Browser instance obtained:', !!browser);
 
     // Create fresh context for interactive login (don't load existing storageState)
-    this.context = await browser.newContext({
+    this.context = await browser.newContext(this.buildContextOptions({
       viewport: { width: 1280, height: 720 }
-    });
+    }));
     console.log('Context created successfully');
 
     this.page = await this.context.newPage();
@@ -196,7 +255,7 @@ class PlaywrightManager {
     try {
       // Try to load existing authenticated context
       const storageState = JSON.parse(await fs.readFile(this.storageStatePath, 'utf8'));
-      this.context = await browser.newContext({ storageState });
+      this.context = await browser.newContext(this.buildContextOptions({ storageState }));
       this.page = await this.context.newPage();
       
       // Navigate to the base URL to establish the session context
@@ -450,88 +509,142 @@ class PlaywrightManager {
       // Extract content information from the table
       const result = await this.page.evaluate(({ limit, contentType, page }) => {
         console.log('Evaluating page content...');
-        
+
         // Look for any table on the page
         const tables = document.querySelectorAll('table');
         console.log(`Found ${tables.length} tables on the page`);
-        
+
         if (tables.length === 0) {
           console.log('No tables found on the page');
           return { content: [], hasNextPage: false, hasPrevPage: page > 1 };
         }
 
-        const table = tables[0]; // Use the first table
+        // Prefer a table that looks like the admin content listing (has Title
+        // and Status headers); fall back to the first table on the page.
+        const headerTexts = table => Array.from(table.querySelectorAll('thead th'))
+          .map(th => th.textContent.trim().toLowerCase());
+
+        let table = tables[0];
+        for (const candidate of tables) {
+          const heads = headerTexts(candidate);
+          if (heads.some(h => h.startsWith('title')) && heads.some(h => h.startsWith('status'))) {
+            table = candidate;
+            break;
+          }
+        }
+
+        // Map columns by header label rather than fixed positions - Drupal
+        // sites reorder these columns and add a bulk-operations checkbox column.
+        const heads = headerTexts(table);
+        const findColumn = (names, fallback) => {
+          const index = heads.findIndex(head => names.some(name => head.startsWith(name)));
+          return index >= 0 ? index : fallback;
+        };
+
+        const columns = {
+          title: findColumn(['title'], 0),
+          type: findColumn(['content type', 'type'], 2),
+          status: findColumn(['status'], 3),
+          updated: findColumn(['updated'], 4),
+          created: findColumn(['created'], 5),
+          author: findColumn(['author'], -1),
+          operations: findColumn(['operations'], 6)
+        };
+        console.log('Column map:', JSON.stringify(columns));
+
         const rows = table.querySelectorAll('tbody tr');
         console.log('Found', rows.length, 'rows in table');
-        
+
+        const cellAt = (cells, index) => (index >= 0 && cells[index] ? cells[index] : null);
+        const textAt = (cells, index) => {
+          const cell = cellAt(cells, index);
+          return cell ? cell.textContent.trim() : '';
+        };
+        const firstLine = text => (text.split('\n').map(part => part.trim()).filter(Boolean)[0] || '');
+
         const contentItems = [];
 
-        for (let i = 0; i < Math.min(rows.length, limit); i++) {
-          const row = rows[i];
+        for (const row of rows) {
           const cells = row.querySelectorAll('td');
-          console.log(`Row ${i}: Found ${cells.length} cells`);
-          
-          if (cells.length >= 3) {
-            // Extract data more flexibly
-            const cellTexts = Array.from(cells).map(cell => cell.textContent.trim());
-            console.log(`Row ${i} cell texts:`, cellTexts);
-            
-            // Parse the actual table structure for Drupal content admin
-            // Columns appear to be: Title, Content Path/Title, Type, Status, Updated+Author, Created+Author, Operations
-            const title = cellTexts[0] || 'Unknown';
-            const contentPath = cellTexts[1] || '';
-            const type = cellTexts[2] || 'Unknown';
-            const status = cellTexts[3] || 'Unknown';
-            
-            // Parse updated field (contains date + author)
-            const updatedField = cellTexts[4] || '';
-            const updatedMatch = updatedField.match(/^([^\n]+)/);
-            const updated = updatedMatch ? updatedMatch[1] : updatedField;
-            
-            // Parse author from updated field (usually after multiple newlines)
-            const authorMatch = updatedField.match(/\n\n\n([^\n]+)/);
-            const author = authorMatch ? authorMatch[1] : 'Unknown';
-            
-            // Parse created field
-            const createdField = cellTexts[5] || '';
-            const createdMatch = createdField.match(/^([^\n]+)/);
-            const created = createdMatch ? createdMatch[1] : createdField;
-            
-            // Look for edit URL in operations cell
-            const operationsCell = cells[6];
-            let editUrl = null;
-            if (operationsCell) {
-              const editLink = operationsCell.querySelector('a[href*="edit"]');
-              if (editLink) {
-                editUrl = editLink.getAttribute('href');
-              }
-            }
+          if (cells.length < 3) continue;
 
-            // Extract node ID from edit URL if available
-            let nodeId = null;
-            if (editUrl) {
-              const match = editUrl.match(/\/node\/(\d+)\//);
-              if (match) nodeId = parseInt(match[1]);
-            }
+          // Title cell holds a link to the node plus, on some themes, the path
+          const titleCell = cellAt(cells, columns.title);
+          const titleLink = titleCell ? titleCell.querySelector('a') : null;
+          const title = titleLink
+            ? titleLink.textContent.trim()
+            : firstLine(textAt(cells, columns.title)) || 'Unknown';
 
-            // Apply content type filter if specified
-            if (contentType && type.toLowerCase() !== contentType.toLowerCase()) {
-              continue;
-            }
+          const pathElement = titleCell ? titleCell.querySelector('.node-path') : null;
+          const contentPath = pathElement
+            ? pathElement.textContent.trim()
+            : (titleLink ? titleLink.getAttribute('href') || '' : '');
 
-            contentItems.push({
-              id: nodeId,
-              title: title,
-              contentTitle: contentPath,
-              type: type,
-              status: status,
-              author: author,
-              updated: updated,
-              created: created,
-              editUrl: editUrl,
-              viewUrl: editUrl ? editUrl.replace('/edit', '') : null
-            });
+          const type = firstLine(textAt(cells, columns.type)) || 'Unknown';
+
+          // Status cells can carry extra markers (e.g. a "Restricted" badge).
+          // Keep the plain Published/Unpublished value and flag the rest.
+          const statusCell = cellAt(cells, columns.status);
+          let status = 'Unknown';
+          let restricted = false;
+          if (statusCell) {
+            restricted = !!statusCell.querySelector('.restricted-indicator');
+            const directText = Array.from(statusCell.childNodes)
+              .filter(node => node.nodeType === 3)
+              .map(node => node.textContent.trim())
+              .filter(Boolean)
+              .join(' ');
+            status = directText || firstLine(statusCell.textContent) || 'Unknown';
           }
+
+          // Date cells contain the timestamp followed by the acting user
+          const updatedField = textAt(cells, columns.updated);
+          const updated = firstLine(updatedField);
+          const createdField = textAt(cells, columns.created);
+          const created = firstLine(createdField);
+
+          let author = 'Unknown';
+          if (columns.author >= 0) {
+            author = firstLine(textAt(cells, columns.author)) || 'Unknown';
+          } else {
+            const authorMatch = updatedField.match(/\n\s*\n\s*\n?\s*([^\n]+)/);
+            if (authorMatch) author = authorMatch[1].trim();
+          }
+
+          // Operations cell holds the edit link; fall back to any edit link in the row
+          const operationsCell = cellAt(cells, columns.operations) || cells[cells.length - 1];
+          let editLink = operationsCell ? operationsCell.querySelector('a[href*="/edit"]') : null;
+          if (!editLink) editLink = row.querySelector('a[href*="/edit"]');
+          const editUrl = editLink ? editLink.getAttribute('href') : null;
+
+          // Node ID can come from the edit link or the node path
+          let nodeId = null;
+          const idSource = editUrl || (titleLink ? titleLink.getAttribute('href') : '') || contentPath;
+          const idMatch = idSource ? idSource.match(/\/node\/(\d+)/) : null;
+          if (idMatch) nodeId = parseInt(idMatch[1], 10);
+
+          // Apply content type filter if specified
+          if (contentType && type.toLowerCase() !== contentType.toLowerCase()) {
+            continue;
+          }
+
+          contentItems.push({
+            id: nodeId,
+            title: title,
+            contentTitle: contentPath,
+            type: type,
+            status: status,
+            restricted: restricted,
+            author: author,
+            updated: updated,
+            created: created,
+            editUrl: editUrl,
+            viewUrl: nodeId ? `/node/${nodeId}` : null
+          });
+
+          // Filter first, then cap - otherwise a type filter silently drops
+          // matching rows that sit past the limit in the unfiltered table
+          if (contentItems.length >= limit) break;
         }
 
         // Check for pagination information
@@ -1069,6 +1182,360 @@ class PlaywrightManager {
     };
   }
 
+  /**
+   * List the blocks placed in a node's Layout Builder layout.
+   *
+   * Layout Builder addresses each block by section delta, region, and UUID, so
+   * those three values are what every other layout call needs. The admin label
+   * and block plugin ID come free from the layout markup; the list of
+   * configurable field names costs one page load per block, so it is opt-in.
+   *
+   * @param {string|number} nodeId - Node whose layout to inspect
+   * @param {Object} options - { withFields: also list each block's form fields }
+   * @returns {Object} Result with the block list
+   */
+  async queryLayoutBlocks(nodeId, options = {}) {
+    const { withFields = false } = options;
+
+    try {
+      if (!this.page) {
+        throw new Error('No active page for layout query');
+      }
+
+      const baseUrl = process.env.BASE_URL;
+      if (!baseUrl) {
+        throw new Error('BASE_URL environment variable is required for layout queries');
+      }
+
+      const layoutUrl = this.buildUrl(baseUrl, `node/${nodeId}/layout`);
+      console.log('Navigating to layout page:', layoutUrl);
+      await this.page.goto(layoutUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUTS.NAVIGATION });
+      await this.page.waitForSelector('[data-layout-block-uuid], .layout-builder', { timeout: TIMEOUTS.FORM_LOAD });
+
+      const blocks = await this.page.evaluate(() => {
+        const found = [];
+
+        // Each block sits inside a section wrapper. The section's "Add block"
+        // link is the reliable carrier of the delta and region, because the
+        // block elements themselves only expose the UUID.
+        const sections = document.querySelectorAll('.layout-builder__section');
+
+        const readSectionAddress = section => {
+          const addLink = section.querySelector('a[href*="/layout_builder/choose/block/"]');
+          if (!addLink) return null;
+          const match = (addLink.getAttribute('href') || '')
+            .match(/\/layout_builder\/choose\/block\/[^/]+\/[^/]+\/(\d+)\/([^/?#]+)/);
+          return match ? { delta: parseInt(match[1], 10), region: match[2] } : null;
+        };
+
+        sections.forEach(section => {
+          const address = readSectionAddress(section);
+          const blockElements = section.querySelectorAll('[data-layout-block-uuid]');
+
+          blockElements.forEach(element => {
+            // Layout Builder renders the admin label as '"My label" block'
+            const rawLabel = element.getAttribute('data-layout-content-preview-placeholder-label') || '';
+            const labelMatch = rawLabel.match(/^"(.*)"\s+block$/);
+
+            found.push({
+              uuid: element.getAttribute('data-layout-block-uuid'),
+              delta: address ? address.delta : null,
+              region: address ? address.region : null,
+              pluginId: element.getAttribute('data-block-plugin-id') || null,
+              label: labelMatch ? labelMatch[1] : (rawLabel || null),
+              preview: element.textContent.trim().replace(/\s+/g, ' ').slice(0, 120)
+            });
+          });
+        });
+
+        return found;
+      });
+
+      const usable = blocks.filter(block => block.uuid && block.delta !== null && block.region);
+      if (usable.length !== blocks.length) {
+        console.warn(`${blocks.length - usable.length} layout block(s) had no resolvable section address and were dropped`);
+      }
+
+      // Labels and plugin IDs come straight off the layout markup. Field names
+      // require opening each block's configure form, so they stay opt-in.
+      if (withFields) {
+        for (const block of usable) {
+          const detail = await this.getLayoutBlockDetail(nodeId, block.delta, block.region, block.uuid);
+          block.fields = detail.success ? Object.keys(detail.block.data) : [];
+        }
+      }
+
+      return {
+        success: true,
+        nodeId: nodeId,
+        blocks: usable,
+        count: usable.length
+      };
+    } catch (error) {
+      console.error('Error querying layout blocks:', error);
+      return {
+        success: false,
+        error: error.message,
+        suggestion: 'Ensure the node uses Layout Builder and you have permission to edit its layout'
+      };
+    }
+  }
+
+  /**
+   * Build the Layout Builder URL that renders a single block's configure form.
+   */
+  buildLayoutBlockUrl(baseUrl, nodeId, delta, region, uuid) {
+    return this.buildUrl(
+      baseUrl,
+      `layout_builder/update/block/overrides/node.${nodeId}/${delta}/${region}/${uuid}`
+    );
+  }
+
+  /**
+   * Read the configure form of a single Layout Builder block.
+   *
+   * @returns {Object} Result with the block's label and all form field values
+   */
+  async getLayoutBlockDetail(nodeId, delta, region, uuid) {
+    try {
+      if (!this.page) {
+        throw new Error('No active page for layout block query');
+      }
+
+      const baseUrl = process.env.BASE_URL;
+      if (!baseUrl) {
+        throw new Error('BASE_URL environment variable is required for layout queries');
+      }
+
+      const blockUrl = this.buildLayoutBlockUrl(baseUrl, nodeId, delta, region, uuid);
+      await this.page.goto(blockUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUTS.NAVIGATION });
+      // 'attached' rather than the default 'visible': a page can render a hidden
+      // form (e.g. site search) ahead of the one being edited.
+      await this.page.waitForSelector('form', { state: 'attached', timeout: TIMEOUTS.FORM_LOAD });
+
+      const data = await this.page.evaluate(() => {
+        const values = {};
+        const fields = document.querySelectorAll('input[name], textarea[name], select[name]');
+
+        fields.forEach(field => {
+          const name = field.getAttribute('name');
+          if (!name) return;
+
+          // Radios and checkboxes report their checked state, not their value
+          if (field.type === 'checkbox' || field.type === 'radio') {
+            if (field.checked) values[name] = field.value;
+            else if (!(name in values)) values[name] = null;
+            return;
+          }
+
+          values[name] = field.value;
+        });
+
+        return values;
+      });
+
+      return {
+        success: true,
+        block: {
+          nodeId: nodeId,
+          delta: delta,
+          region: region,
+          uuid: uuid,
+          label: data['settings[label]'] !== undefined ? data['settings[label]'] : null,
+          url: this.page.url(),
+          data: data
+        }
+      };
+    } catch (error) {
+      console.error('Error reading layout block:', error);
+      return { success: false, error: error.message, uuid: uuid };
+    }
+  }
+
+  /**
+   * Update one Layout Builder block's configuration.
+   *
+   * Layout Builder stages edits in a per-user tempstore: submitting this form
+   * changes nothing on the live page until saveLayout() is called. Batch several
+   * updates and save once, or pass save: true to persist immediately.
+   *
+   * @param {string|number} nodeId - Node whose layout holds the block
+   * @param {number} delta - Section delta
+   * @param {string} region - Region machine name
+   * @param {string} uuid - Block UUID
+   * @param {Object} updates - Form field name/value pairs
+   * @param {Object} options - { save: also persist the layout afterwards }
+   */
+  async updateLayoutBlock(nodeId, delta, region, uuid, updates, options = {}) {
+    const { save = false } = options;
+
+    try {
+      if (!this.page) {
+        throw new Error('No active page for layout block update');
+      }
+
+      const baseUrl = process.env.BASE_URL;
+      if (!baseUrl) {
+        throw new Error('BASE_URL environment variable is required for layout updates');
+      }
+
+      const blockUrl = this.buildLayoutBlockUrl(baseUrl, nodeId, delta, region, uuid);
+      console.log('Navigating to layout block form:', blockUrl);
+      await this.page.goto(blockUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUTS.NAVIGATION });
+      await this.page.waitForSelector('form', { state: 'attached', timeout: TIMEOUTS.FORM_LOAD });
+
+      // Block forms are plugin-defined, so there is no schema to consult -
+      // field types are inferred from the rendered widget.
+      const updateResults = await this.updateFormFields(updates, null);
+
+      if (updateResults.updated.length === 0) {
+        const reasons = updateResults.skipped.map(field => `${field.field}: ${field.reason}`).join('; ');
+        return {
+          success: false,
+          uuid: uuid,
+          error: `No fields could be updated on block ${uuid}, form not submitted${reasons ? ` (${reasons})` : ''}`,
+          updatedFields: [],
+          skippedFields: updateResults.skipped
+        };
+      }
+
+      // The block form's submit button is labelled "Update" (or "Add block")
+      const submitButton = this.page.locator(
+        'input[type="submit"][value="Update"], button[type="submit"]:has-text("Update"), ' +
+        'input[type="submit"][value*="Add block"], button[type="submit"]:has-text("Add block")'
+      ).first();
+
+      if (await submitButton.count() === 0) {
+        throw new Error('Could not find the Update button on the block configure form');
+      }
+
+      await submitButton.click();
+
+      try {
+        await this.page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE });
+      } catch {
+        this.debugLog('Network idle timeout after block update, continuing');
+      }
+
+      const result = {
+        success: true,
+        nodeId: nodeId,
+        delta: delta,
+        region: region,
+        uuid: uuid,
+        message: `Block ${uuid} staged in the layout`,
+        saved: false,
+        updatedFields: updateResults.updated,
+        skippedFields: updateResults.skipped
+      };
+
+      if (save) {
+        const saveResult = await this.saveLayout(nodeId);
+        result.saved = saveResult.success;
+        if (!saveResult.success) {
+          result.success = false;
+          result.error = saveResult.error;
+        }
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Error updating layout block:', error);
+      return { success: false, error: error.message, uuid: uuid };
+    }
+  }
+
+  /**
+   * Persist staged Layout Builder changes for a node.
+   */
+  async saveLayout(nodeId) {
+    return await this.submitLayoutAction(nodeId, {
+      selector: 'input[type="submit"][value*="Save layout"], button:has-text("Save layout")',
+      action: 'save',
+      missingMessage: 'Could not find the "Save layout" button - there may be no staged changes'
+    });
+  }
+
+  /**
+   * Drop staged Layout Builder changes for a node without saving them.
+   */
+  async discardLayoutChanges(nodeId) {
+    const result = await this.submitLayoutAction(nodeId, {
+      selector: 'input[type="submit"][value*="Discard changes"], button:has-text("Discard changes"), a:has-text("Discard changes")',
+      action: 'discard',
+      missingMessage: 'Could not find the "Discard changes" button - there may be no staged changes'
+    });
+
+    if (!result.success) return result;
+
+    // Discarding asks for confirmation on its own page
+    const confirmButton = this.page.locator(
+      'input[type="submit"][value*="Confirm"], button:has-text("Confirm"), input[type="submit"][value*="Discard"]'
+    ).first();
+
+    if (await confirmButton.count() > 0) {
+      await confirmButton.click();
+      try {
+        await this.page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE });
+      } catch {
+        this.debugLog('Network idle timeout after discard confirmation, continuing');
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Shared driver for the Save/Discard buttons on the layout edit page.
+   */
+  async submitLayoutAction(nodeId, { selector, action, missingMessage }) {
+    try {
+      if (!this.page) {
+        throw new Error(`No active page for layout ${action}`);
+      }
+
+      const baseUrl = process.env.BASE_URL;
+      if (!baseUrl) {
+        throw new Error(`BASE_URL environment variable is required for layout ${action}`);
+      }
+
+      const layoutUrl = this.buildUrl(baseUrl, `node/${nodeId}/layout`);
+      await this.page.goto(layoutUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUTS.NAVIGATION });
+
+      // Wait for the action button itself. Waiting on a generic 'form' picks up
+      // whichever form renders first (often a hidden search form) and stalls.
+      try {
+        await this.page.waitForSelector(selector, { state: 'attached', timeout: TIMEOUTS.FORM_LOAD });
+      } catch {
+        throw new Error(missingMessage);
+      }
+
+      const button = this.page.locator(selector).first();
+      if (await button.count() === 0) {
+        throw new Error(missingMessage);
+      }
+
+      await button.click();
+
+      try {
+        await this.page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE });
+      } catch {
+        this.debugLog(`Network idle timeout after layout ${action}, continuing`);
+      }
+
+      return {
+        success: true,
+        nodeId: nodeId,
+        action: action,
+        message: `Layout ${action === 'save' ? 'saved' : 'changes discarded'} for node ${nodeId}`,
+        redirectUrl: this.page.url()
+      };
+    } catch (error) {
+      console.error(`Error during layout ${action}:`, error);
+      return { success: false, error: error.message, nodeId: nodeId, action: action };
+    }
+  }
+
   isReady() {
     return !!(this.browser && this.context && this.page);
   }
@@ -1155,6 +1622,21 @@ class PlaywrightManager {
       // Update fields based on schema or field names
       const updateResults = await this.updateFormFields(updates, schema);
       this.debugFileLog('/tmp/content_update.log', `Fields updated: ${JSON.stringify(updateResults)}\n`);
+
+      // Nothing resolved to a real form field - saving here would re-save the
+      // node unchanged and hide the fact that the update never applied.
+      if (updateResults.updated.length === 0) {
+        const reasons = updateResults.skipped.map(field => `${field.field}: ${field.reason}`).join('; ');
+        this.debugFileLog('/tmp/content_update.log', `No fields updated, skipping save. ${reasons}\n`);
+
+        return {
+          success: false,
+          nodeId: nodeId,
+          error: `No fields could be updated on node ${nodeId}, form not submitted`,
+          updatedFields: [],
+          skippedFields: updateResults.skipped
+        };
+      }
 
       // Submit the form
       this.debugFileLog('/tmp/content_update.log', 'Submitting form...\n');
@@ -1390,17 +1872,28 @@ class PlaywrightManager {
    */
   async detectContentType() {
     try {
-      // Try to get content type from form data-drupal-selector or URL
       const contentType = await this.page.evaluate(() => {
-        // Check form class or data attributes
+        // Drupal renders a hidden form_id on every node form, shaped as
+        // node_<machine_name>_form or node_<machine_name>_edit_form. This is
+        // the most reliable source because it keeps underscores intact.
+        const formId = document.querySelector('input[name="form_id"]')?.value || '';
+        const formIdMatch = formId.match(/^node_(.+)_form$/);
+        if (formIdMatch) {
+          return formIdMatch[1].replace(/_edit$/, '');
+        }
+
+        // data-drupal-selector carries the same name with underscores rendered
+        // as dashes (node-ps-events-edit-form), so convert them back.
         const form = document.querySelector('form[data-drupal-selector*="node-"]');
         if (form) {
           const selector = form.getAttribute('data-drupal-selector') || '';
-          const match = selector.match(/node-([a-z0-9_]+)-/);
-          if (match) return match[1];
+          const selectorMatch = selector.match(/^node-(.+)-form$/);
+          if (selectorMatch) {
+            return selectorMatch[1].replace(/-edit$/, '').replace(/-/g, '_');
+          }
         }
 
-        // Check for content type in form action or other attributes
+        // Fall back to the node/add/<type> path on a creation form
         const formAction = document.querySelector('form')?.action || '';
         const urlMatch = formAction.match(/\/node\/add\/([a-z0-9_]+)/);
         if (urlMatch) return urlMatch[1];
@@ -1415,9 +1908,6 @@ class PlaywrightManager {
     }
   }
 
-  /**
-   * Load schema for a content type
-   */
   async loadSchemaForContentType(contentType) {
     try {
       if (typeof contentType !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(contentType)) {
@@ -1439,6 +1929,34 @@ class PlaywrightManager {
   /**
    * Update form fields based on provided updates and optional schema
    */
+  /**
+   * Find a schema field whose selector targets the given raw form field name.
+   *
+   * Lets callers address fields by their Drupal form name (the names returned
+   * by /content/detail) while still picking up the schema's declared type.
+   *
+   * @param {Object|null} schema - Loaded content type schema
+   * @param {string} fieldName - Raw Drupal form field name
+   * @returns {Object|null} Matching schema field definition, or null
+   */
+  findSchemaFieldBySelector(schema, fieldName) {
+    if (!schema || !schema.fields) {
+      return null;
+    }
+
+    // Match [name="field"] and select[name="field"] alike
+    const nameSelector = `[name="${fieldName}"]`;
+
+    for (const definition of Object.values(schema.fields)) {
+      const selector = definition && definition.selector;
+      if (typeof selector === 'string' && selector.includes(nameSelector)) {
+        return definition;
+      }
+    }
+
+    return null;
+  }
+
   async updateFormFields(updates, schema) {
     const updated = [];
     const skipped = [];
@@ -1447,14 +1965,28 @@ class PlaywrightManager {
       try {
         let selector = null;
         let fieldType = 'text';
+        let typeFromSchema = false;
 
         // If schema is available, use it to get the selector and type
         if (schema && schema.fields && schema.fields[fieldName]) {
           selector = schema.fields[fieldName].selector;
           fieldType = schema.fields[fieldName].type || 'text';
+          typeFromSchema = true;
         } else {
-          // Try to guess the selector based on common Drupal patterns
-          selector = `[name="${fieldName}[0][value]"]`;
+          // Callers may pass the raw Drupal form name (field_x[0][value])
+          // rather than the schema's friendly key. Match it back to the schema
+          // entry by selector so the declared field type still applies -
+          // widgets like hidden_select need it to be handled correctly.
+          const schemaEntry = this.findSchemaFieldBySelector(schema, fieldName);
+
+          if (schemaEntry) {
+            selector = schemaEntry.selector;
+            fieldType = schemaEntry.type || 'text';
+            typeFromSchema = true;
+          } else {
+            // Try to guess the selector based on common Drupal patterns
+            selector = `[name="${fieldName}[0][value]"]`;
+          }
         }
 
         console.log(`Attempting to update field: ${fieldName} with selector: ${selector}`);
@@ -1486,13 +2018,33 @@ class PlaywrightManager {
           }
         }
 
-        // Detect if the field is actually a checkbox by checking the element
+        // Inspect the resolved element so the widget drives handling
         const element = this.page.locator(selector).first();
         const elementType = await element.getAttribute('type').catch(() => null);
+        let tagName = null;
+        try {
+          tagName = await element.evaluate(node => node.tagName.toLowerCase());
+        } catch {
+          // Element evaluation is unavailable - fall back to the declared type
+          tagName = null;
+        }
 
-        // Override fieldType if we detect it's actually a checkbox
+        // A checkbox always wins - a schema that calls it text would misfire
         if (elementType === 'checkbox') {
           fieldType = 'checkbox';
+        } else if (!typeFromSchema) {
+          // Without a schema, infer from the markup. Textareas matter most:
+          // Drupal wraps rich-text ones in CKEditor, which hides the element
+          // and makes a plain fill() fail.
+          if (tagName === 'textarea') {
+            fieldType = 'textarea';
+          } else if (tagName === 'select') {
+            fieldType = 'select';
+          } else if (elementType === 'date') {
+            fieldType = 'date';
+          } else if (elementType === 'time') {
+            fieldType = 'time';
+          }
         }
 
         // Update field based on type

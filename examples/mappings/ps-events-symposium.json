@@ -1,0 +1,15 @@
+{
+  "$comment": "Princeton Site Builder ps_events, driven by a student roster CSV. Copy and edit for other CSV shapes or content types.",
+  "contentType": "ps_events",
+  "fields": {
+    "title": { "template": "{First} {Last}", "required": true },
+    "subtitle": "{Talk Title|TBD}",
+    "body": "<p>Adviser: {Adviser|TBD}</p>",
+    "event_audience": "{Event Audience}",
+    "event_start_date": { "template": "{Date}", "transform": "date", "required": true },
+    "event_start_time": { "template": "{Start Time}", "transform": "time" },
+    "event_end_date": { "template": "{Date}", "transform": "date" },
+    "event_end_time": { "template": "{End Time}", "transform": "time" },
+    "all_day": { "value": false }
+  }
+}

@@ -10,6 +10,8 @@ An API for the Drupal UI when the actual API is MIA.
 - **VNC Access**: Real-time browser interaction via noVNC web interface
 - **Session Persistence**: Browser contexts saved to persistent storage
 - **CRUD Operations**: Create, Read, Update, Delete content via UI automation
+- **Layout Builder**: Read and bulk-edit placed blocks, staged then published in one commit
+- **CSV Import/Export**: Mapping-driven import, filtered export, and reproducible scheduling
 
 ## Quick Start
 
@@ -27,6 +29,10 @@ docker-compose up -d
 # Check health
 curl http://localhost:3000/health
 ```
+
+> **Port already in use?** The host ports are configurable - set `BSP_API_PORT`,
+> `BSP_NOVNC_PORT` and `BSP_VNC_PORT` in `.env`. The examples below use the
+> defaults (3000 / 8080). See [Host Ports](#host-ports).
 
 ### 2. Authenticate
 
@@ -90,6 +96,12 @@ curl -X PUT -H "Content-Type: application/json" \
 | **Content Modification** ||||
 | `/content` | POST | Create new content | Yes |
 | `/content/:nodeId` | PUT | Update content by node ID | Yes |
+| **Layout Builder** ||||
+| `/layout/:nodeId/blocks` | GET | List blocks placed in a node's layout | Yes |
+| `/layout/:nodeId/block/:delta/:region/:uuid` | GET | Read a block's configuration | Yes |
+| `/layout/:nodeId/block/:delta/:region/:uuid` | PUT | Update a block's configuration (staged) | Yes |
+| `/layout/:nodeId/save` | POST | Persist staged layout changes | Yes |
+| `/layout/:nodeId/discard` | POST | Drop staged layout changes | Yes |
 | **Debug** ||||
 | `/debug/screenshot` | GET | Capture current page screenshot | Yes |
 | `/debug/page` | GET | Get current page information | Yes |
@@ -537,9 +549,158 @@ The example demonstrates:
 
 ---
 
+### Bulk Unpublish Events
+
+`examples/unpublish-events.js` finds every published event node and unpublishes
+it by clearing the node form's **Published** checkbox (`status[value]`).
+
+It is a **dry run by default** - it lists what it would change and touches
+nothing until you pass `--execute`.
+
+```bash
+# 1. See what would be unpublished (no changes)
+node examples/unpublish-events.js
+
+# 2. Sanity-check a single node first
+node examples/unpublish-events.js --execute --nodes 123
+
+# 3. Unpublish everything it found
+node examples/unpublish-events.js --execute --report unpublish-report.json
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--execute` | Apply the changes (default is a dry run) |
+| `--type <name>` | Content type label or machine name (default: `events`, `ps_events`, `event`) |
+| `--nodes <ids>` | Comma-separated node IDs; restricts the run to these nodes |
+| `--max <n>` | Safety cap on how many nodes may be unpublished (default: 500) |
+| `--delay <ms>` | Delay between node updates (default: 1500) |
+| `--page-size <n>` | Items per `admin/content` page request (default: 50, max 100) |
+| `--report <path>` | Write a JSON report of the run |
+| `--api <url>` | API base URL (default: `$API_BASE` or `http://localhost:3000`) |
+
+**Safety behaviour:**
+- Only rows whose type matches *and* whose status is `Published` are selected.
+- A node is counted as unpublished only when the API reports `status[value]` in
+  `updatedFields`; a skipped field is reported as a failure, not a success.
+- A failed node does not abort the run; failures are listed at the end and the
+  script exits non-zero.
+
+---
+
 ### Delete (Not Yet Implemented)
 
 Coming soon.
+
+---
+
+## 🧱 Layout Builder
+
+Drupal's Layout Builder places configurable blocks into a node's layout. BSP
+addresses each block the way Layout Builder does - by **section delta**,
+**region**, and **UUID** - and exposes the block's own configuration form.
+
+### Staged vs. saved
+
+Layout Builder writes edits to a per-user tempstore. A block update changes
+nothing on the live page until the layout is saved. That is deliberate: it lets
+you stage many block edits and publish them in a single commit, or walk away
+from a half-finished batch without touching the live site.
+
+```
+PUT  /layout/1/block/2/content/<uuid>     -> staged (live page unchanged)
+PUT  /layout/1/block/2/content/<uuid>     -> staged
+POST /layout/1/save                       -> all staged edits go live at once
+POST /layout/1/discard                    -> staged edits thrown away
+```
+
+Pass `?save=true` on a block update to stage and save in one call.
+
+### Discovering blocks
+
+```bash
+curl "http://localhost:3000/layout/1/blocks"
+```
+
+```json
+{
+  "success": true,
+  "nodeId": "1",
+  "blocks": [
+    {
+      "uuid": "cd8dc15d-e080-4765-9ffe-8d4a417ca4ff",
+      "delta": 2,
+      "region": "content",
+      "pluginId": "ps_events_list_conference",
+      "label": "001 - Sherrerd Hall",
+      "preview": "001 - Sherrerd Hall ORFE Advisers: TBD ..."
+    }
+  ],
+  "count": 8
+}
+```
+
+`pluginId` and `label` are read straight from the layout markup, which makes
+them cheap filters for "every block of this type". Add `?fields=true` to also
+list each block's configurable field names - that costs one page load per block.
+
+### Reading and updating a block
+
+```bash
+# Read every field on the block's configure form
+curl "http://localhost:3000/layout/1/block/2/content/<uuid>"
+
+# Update fields (staged)
+curl -X PUT -H "Content-Type: application/json" \
+  "http://localhost:3000/layout/1/block/2/content/<uuid>" \
+  -d '{"settings[label]": "New label"}'
+
+# Publish everything staged so far
+curl -X POST "http://localhost:3000/layout/1/save"
+```
+
+Field names are the raw Drupal form names, as returned by the block read
+endpoint (`settings[label]`, `settings[ps_core_description][value]`, ...).
+Block forms are plugin-defined, so there is no schema to consult - the field
+type is inferred from the rendered widget, including CKEditor-backed textareas.
+
+### Bulk Block Updates
+
+`examples/update-layout-blocks.js` applies field values across every block in a
+layout that matches a filter. It stages all matching blocks, then saves once. If
+any block fails to stage, the layout is **not** saved and staged changes are
+discarded, so the live layout is left exactly as it was.
+
+```bash
+# Inspect: which blocks match, and what the field currently holds
+node examples/update-layout-blocks.js --node 1 \
+  --plugin ps_events_list_conference \
+  --field 'settings[ps_core_description][value]'
+
+# Apply the same value to every matching block
+node examples/update-layout-blocks.js --node 1 \
+  --plugin ps_events_list_conference \
+  --field 'settings[ps_core_description][value]' \
+  --value '<ul><li>ORFE Advisers: TBD</li><li>PhD Candidates / Graduate Students: TBD</li></ul>' \
+  --execute --report layout-report.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--node <id>` | Node whose layout to edit (required) |
+| `--plugin <id>` | Only blocks with this block plugin ID |
+| `--label <regex>` | Only blocks whose admin label matches this regex |
+| `--uuids <list>` | Comma-separated block UUIDs |
+| `--field <name>` | Field to set (repeatable, pairs with `--value`) |
+| `--value <text>` | Value for the preceding `--field` |
+| `--value-file <path>` | Read the preceding field's value from a file |
+| `--execute` | Apply the changes (default is a dry run) |
+| `--keep-staged` | On failure, leave staged changes instead of discarding |
+| `--report <path>` | Write a JSON report of the run |
+
+A `--field` with no `--value` inspects that field instead of changing it.
 
 ---
 
@@ -695,6 +856,206 @@ curl http://localhost:3000/login/check
 
 ---
 
+## 📇 CSV Import & Export
+
+Three scripts cover bulk data in and out. They share one idea: **column-to-field
+decisions live in a mapping file, not in the script**, so the same tooling serves
+any CSV shape and any content type.
+
+| Script | Purpose |
+|--------|---------|
+| `examples/import-csv.js` | Create nodes from a CSV via a field mapping |
+| `examples/export-csv.js` | Write site content out to a CSV |
+| `examples/schedule-events.js` | Fill blank room/time columns reproducibly |
+
+Ready-made starting points live in [`examples/templates/`](examples/templates/)
+(CSV files) and `examples/mappings/` (field mappings).
+
+---
+
+### Field Mappings
+
+A mapping says which CSV columns become which Drupal form fields:
+
+```json
+{
+  "contentType": "ps_events",
+  "fields": {
+    "title":            { "template": "{First} {Last}", "required": true },
+    "subtitle":         "{Talk Title|TBD}",
+    "body":             "<p>Adviser: {Adviser|TBD}</p>",
+    "event_audience":   "{Event Audience}",
+    "event_start_date": { "template": "{Date}", "transform": "date" },
+    "event_start_time": { "template": "{Start Time}", "transform": "time" },
+    "all_day":          { "value": false }
+  }
+}
+```
+
+**Template syntax**
+
+| Form | Meaning |
+|------|---------|
+| `{Column}` | Value of that CSV column |
+| `{Column\|fallback}` | That value, or `fallback` when blank or missing |
+| `{{` and `}}` | Literal braces |
+| Any surrounding text | Kept as-is, so `<p>Adviser: {Adviser}</p>` works |
+
+**Field options**
+
+| Key | Meaning |
+|-----|---------|
+| `"template"` | Rendered from the row (a bare string is shorthand for this) |
+| `"value"` | A literal - use for booleans and constants, never read from the CSV |
+| `"transform"` | `date`, `time`, `number`, `boolean`, `trim`, `upper`, `lower` |
+| `"required"` | Abort the run if it resolves empty |
+| `"allowEmpty"` | Send the field even when blank (default: omit it) |
+
+Column names are not fixed anywhere. A CSV of `Name,Room,When` just needs a
+mapping that reads those columns - no script changes:
+
+```json
+{
+  "contentType": "ps_events",
+  "fields": {
+    "title": { "template": "{Name}", "required": true },
+    "event_audience": "{Room}",
+    "event_start_date": { "template": "{When}", "transform": "date" }
+  }
+}
+```
+
+---
+
+### Import
+
+**Dry run by default** - it prints exactly what it would submit and creates
+nothing until `--execute`.
+
+```bash
+# 1. See what would be created
+node examples/import-csv.js --csv roster.csv \
+  --map examples/mappings/ps-events-symposium.json --unpublished
+
+# 2. Canary a single row
+node examples/import-csv.js --csv roster.csv --map <spec> --unpublished --limit 1 --execute
+
+# 3. Create the rest
+node examples/import-csv.js --csv roster.csv --map <spec> --unpublished --skip 1 --execute \
+  --report import-report.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--csv <path>` | CSV to import (required) |
+| `--map <path>` | Mapping JSON |
+| `--type <name>` | Content type, overriding the mapping's `contentType` |
+| `--set <f=tmpl>` | Add or override one mapped field, repeatable |
+| `--execute` | Create the nodes (default is a dry run) |
+| `--unpublished` / `--published` | Force the published state |
+| `--limit <n>` | Only the first n rows (canary) |
+| `--skip <n>` | Skip the first n rows (resume a partial run) |
+| `--delay <ms>` | Delay between creations (default: 2000) |
+| `--report <path>` | Write a JSON report |
+| `--api <url>` | API base URL |
+
+`--set` is for one-off tweaks without editing the mapping file:
+
+```bash
+node examples/import-csv.js --csv roster.csv --map <spec> \
+  --set 'subtitle={Talk Title|Untitled}' --set 'field_room={Room}'
+```
+
+**Safety behaviour**
+
+- Every row's field map is built **before** the first node is created, so a
+  malformed row aborts the run rather than leaving a half-imported roster.
+- Missing CSV columns are reported up front, naming what the mapping needs and
+  what the file actually has.
+- A create whose fields were silently skipped counts as a **failure**, not a
+  success.
+
+---
+
+### Export
+
+Pages the admin listing into a CSV. Listing columns are free; node field values
+cost one request per node.
+
+```bash
+# Everything
+node examples/export-csv.js --out content.csv
+
+# Published events only
+node examples/export-csv.js --out events.csv --type Event --status Published
+
+# Pull node fields in as named columns
+node examples/export-csv.js --out roster.csv --type Event \
+  --columns id,title,status \
+  --field 'field_ps_events_subtitle[0][value]=Talk Title' \
+  --field 'field_ps_events_date[0][value][date]=Date'
+```
+
+| Option | Description |
+|--------|-------------|
+| `--out <path>` | Where to write (default: stdout, so it pipes) |
+| `--type <name>` | Only rows of this content type |
+| `--status <name>` | Only rows with this status |
+| `--columns <list>` | Listing columns (default: `id,title,type,status,author,updated,created`) |
+| `--field <f=Col>` | Export a node form field as column `Col`, repeatable |
+| `--limit <n>` | Stop after n matching rows |
+| `--page-size <n>` | Rows per listing request (default: 50, max 100) |
+
+Progress goes to stderr, so `--out` can be omitted and the CSV piped elsewhere.
+A `Published` filter matches trailing status markers such as
+`Published Restricted`, and never matches `Unpublished`.
+
+**Round-tripping:** export writes the same shape import reads, so content can be
+exported, edited in a spreadsheet, and imported back.
+
+---
+
+### Scheduling
+
+`examples/schedule-events.js` fills blank room and time columns on a partially
+complete roster.
+
+```bash
+node examples/schedule-events.js --csv roster.csv \
+  --rooms-file rooms.txt --date 2027-04-30 --seed 20270430 \
+  --start '9:00 AM' --slot 15 --break '10:15 AM' --break-minutes 30
+```
+
+| Option | Description |
+|--------|-------------|
+| `--csv <path>` | CSV to read (required) |
+| `--out <path>` | Where to write (default: overwrite `--csv`) |
+| `--date <date>` | Value for the Date column (required) |
+| `--rooms <list>` | Comma-separated room names |
+| `--rooms-file <path>` | One room name per line (for names containing commas) |
+| `--seed <n>` | PRNG seed (required) |
+| `--start <time>` | First slot start (default: 9:00 AM) |
+| `--slot <minutes>` | Slot length (default: 15) |
+| `--break <time>` | Start of a window no slot may occupy |
+| `--break-minutes <n>` | Break length (default: 30) |
+| `--room-column <name>` | Column to write the room into (default: Event Audience) |
+| `--dry-run` | Print the schedule without writing |
+
+**What the assignment guarantees**
+
+- **Reproducible.** A seeded mulberry32 PRNG drives the shuffle, so the same
+  inputs always produce the same schedule. Re-running never reshuffles everyone.
+- **Evenly loaded.** Positions advance across all rooms before moving to the next
+  time slot, so room counts differ by at most one.
+- **No gaps.** Each room's talks form a contiguous run from the first slot.
+- **No double-booking.** Every (room, time) position is used at most once.
+- **Break respected.** No slot starts inside or runs across the break window.
+
+Omit `--rooms` to reuse the distinct room values already in the CSV, which makes
+re-scheduling an existing roster a one-liner.
+
+---
+
 ## 📦 Batch Processing
 
 ### Pagination
@@ -777,14 +1138,75 @@ DEFAULT_LOGIN_URL=https://example.com/login
 
 # Display settings
 DISPLAY=:99
-NOVNC_URL=http://localhost:8080/vnc.html
 
 # Application settings
 NODE_ENV=production
 
 # Debug logging (set to 'true' to enable detailed logging)
 # DEBUG_LOGGING=true
+
+# Extra HTTP headers sent with every browser request (JSON object)
+# EXTRA_HTTP_HEADERS={"x-wdsoit-bot-bypass":"true"}
+
+# Host ports published by docker-compose (container is always 3000/8080/5900)
+# BSP_API_PORT=3000
+# BSP_NOVNC_PORT=8080
+# BSP_VNC_PORT=5900
 ```
+
+### Host Ports
+
+The container always listens on **3000** (API), **8080** (noVNC) and **5900**
+(VNC) internally. Only the *host* side is configurable, which matters because
+those defaults are heavily contended - and on macOS, AirPlay Receiver
+permanently holds **5000** and **7000**.
+
+```bash
+# .env
+BSP_API_PORT=3080
+BSP_NOVNC_PORT=8090
+BSP_VNC_PORT=5901
+```
+
+```bash
+docker-compose up -d
+curl http://localhost:3080/health
+open http://localhost:8090/vnc.html
+```
+
+The example scripts read `.env` themselves, so they follow `BSP_API_PORT`
+without any flags. Precedence, highest first:
+
+1. `--api http://host:port` on the command line
+2. `API_BASE` exported in the shell
+3. `BSP_API_PORT` exported in the shell
+4. `BSP_API_PORT` in `.env`
+5. `http://localhost:3000`
+
+To check what already owns a port on macOS:
+
+```bash
+lsof -nP -iTCP:3000 -sTCP:LISTEN
+```
+
+### Extra HTTP Headers (WAF / bot-detection bypass)
+
+Sites behind Cloudflare or a similar bot filter often block headless-style
+traffic before it ever reaches Drupal. `EXTRA_HTTP_HEADERS` takes a JSON object
+of header name/value pairs that are attached to **every** request the browser
+context makes - page loads, form posts, and assets alike.
+
+```bash
+# .env
+EXTRA_HTTP_HEADERS={"x-wdsoit-bot-bypass":"true"}
+```
+
+Notes:
+- Applies to both the interactive login context and the restored session context.
+- Invalid JSON is ignored with a warning rather than crashing the browser launch.
+- Only header *names* are logged; values may be secrets and are never printed.
+- Princeton `*.princeton.edu` sites accept `x-wdsoit-bot-bypass` (any value) to
+  bypass Cloudflare bot detection.
 
 ### Docker Services
 
@@ -898,26 +1320,37 @@ curl -X POST http://localhost:3000/login/save
 ## 📁 Project Structure
 
 ```
+├── server.js                      # Express API server
 ├── src/
-│   ├── server.js              # Express API server
-│   └── playwrightManager.js   # Browser lifecycle management
+│   ├── playwrightManager.js       # Browser lifecycle, content & layout automation
+│   ├── apiClient.js               # Shared HTTP client + .env loading for scripts
+│   ├── csv.js                     # RFC 4180 CSV parse/format
+│   ├── fieldMapping.js            # Declarative CSV column -> Drupal field mapping
+│   ├── schedule.js                # Seeded room/time-slot assignment
+│   └── validation.js              # Request validation
 ├── examples/
-│   ├── batch-processor.js     # JavaScript batch processing
-│   ├── batch-processor.py     # Python batch processing
-│   └── update-content.js      # Content update workflow
-├── schemas/
-│   ├── article.json           # Article content type schema
-│   └── event.json             # Event content type schema
+│   ├── import-csv.js              # CSV -> nodes, driven by a field mapping
+│   ├── export-csv.js              # Site content -> CSV
+│   ├── schedule-events.js         # Fill blank room/time columns
+│   ├── unpublish-events.js        # Bulk unpublish by type and status
+│   ├── update-layout-blocks.js    # Bulk Layout Builder block edits
+│   ├── create-content.js          # Single-node creation workflow
+│   ├── update-content.js          # Single-node update workflow
+│   ├── update-symposium.js        # Update existing nodes from a CSV
+│   ├── batch-processor.js / .py   # Pagination and aggregation examples
+│   ├── mappings/                  # Field mapping specs
+│   └── templates/                 # Starter CSV files (see its README)
+├── schemas/                       # Content type field schemas
 ├── tests/
-│   ├── integration/           # API integration tests
-│   ├── unit/                  # Unit tests
-│   └── mock-api-responder.js  # Mock API for testing
-├── storage/                   # Persistent browser contexts
-├── environment.yml            # Conda environment for Python
-├── Dockerfile                 # Multi-stage container build
-├── docker-compose.yml         # Development orchestration
-├── supervisord.conf          # Process management
-└── .env                       # Environment configuration
+│   ├── integration/               # API integration tests
+│   ├── unit/                      # Unit tests
+│   └── mock-api-responder.js      # Mock API for testing
+├── storage/                       # Persistent browser contexts
+├── environment.yml                # Conda environment for Python
+├── Dockerfile                     # Multi-stage container build
+├── docker-compose.yml             # Development orchestration
+├── supervisord.conf               # Process management
+└── .env                           # Environment configuration
 ```
 
 ---

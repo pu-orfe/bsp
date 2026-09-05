@@ -24,3 +24,6 @@ storage/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Run reports written by the example scripts
+*-report.json

@@ -34,7 +34,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const API_BASE = process.env.API_BASE || 'http://localhost:3001';
+const API_BASE = process.env.API_BASE || 'http://localhost:3000';
 const CONTENT_TYPE = 'ps_events';
 const DELAY_MS = 2000;
 
