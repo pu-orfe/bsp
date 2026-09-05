@@ -691,7 +691,7 @@ node examples/update-layout-blocks.js --node 1 \
 |--------|-------------|
 | `--node <id>` | Node whose layout to edit (required) |
 | `--plugin <id>` | Only blocks with this block plugin ID |
-| `--label <regex>` | Only blocks whose admin label matches this regex |
+| `--label <text>` | Only blocks whose admin label contains this text (case-insensitive) |
 | `--uuids <list>` | Comma-separated block UUIDs |
 | `--field <name>` | Field to set (repeatable, pairs with `--value`) |
 | `--value <text>` | Value for the preceding `--field` |

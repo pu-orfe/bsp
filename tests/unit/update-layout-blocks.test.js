@@ -1,5 +1,6 @@
 const {
   parseArgs,
+  matchesLabel,
   selectBlocks,
   listBlocks,
   readBlock,
@@ -62,11 +63,11 @@ describe('update-layout-blocks - parseArgs', () => {
     const options = parseArgs([
       '--node', '1',
       '--plugin', 'ps_events_list_conference',
-      '--label', '- Sherrerd Hall$',
+      '--label', 'Sherrerd Hall',
       '--uuids', 'a, b'
     ]);
     expect(options.plugin).toBe('ps_events_list_conference');
-    expect(options.label).toBe('- Sherrerd Hall$');
+    expect(options.label).toBe('Sherrerd Hall');
     expect(options.uuids).toEqual(['a', 'b']);
   });
 
@@ -77,6 +78,42 @@ describe('update-layout-blocks - parseArgs', () => {
 
   test('unknown arguments are rejected', () => {
     expect(() => parseArgs(['--node', '1', '--wipe'])).toThrow(/Unknown argument/);
+  });
+});
+
+describe('update-layout-blocks - matchesLabel', () => {
+  test('no filter matches everything', () => {
+    expect(matchesLabel('001 - Sherrerd Hall', null)).toBe(true);
+    expect(matchesLabel('001 - Sherrerd Hall', '')).toBe(true);
+  });
+
+  test('matches a substring', () => {
+    expect(matchesLabel('001 - Sherrerd Hall', 'Sherrerd')).toBe(true);
+  });
+
+  test('is case-insensitive', () => {
+    expect(matchesLabel('001 - Sherrerd Hall', 'sherrerd hall')).toBe(true);
+  });
+
+  test('does not match unrelated text', () => {
+    expect(matchesLabel('001 - Sherrerd Hall', 'Fisher')).toBe(false);
+  });
+
+  test('tolerates a missing label', () => {
+    expect(matchesLabel(null, 'x')).toBe(false);
+    expect(matchesLabel(undefined, 'x')).toBe(false);
+  });
+
+  test('regex metacharacters are treated literally, not compiled', () => {
+    // Would match everything if the filter were used as a pattern
+    expect(matchesLabel('001 - Sherrerd Hall', '.*')).toBe(false);
+    expect(matchesLabel('001 - Sherrerd Hall', '^001')).toBe(false);
+    expect(matchesLabel('a.*b', '.*')).toBe(true);
+  });
+
+  test('a pathological pattern cannot cause backtracking', () => {
+    const evil = '(a+)+$';
+    expect(matchesLabel('a'.repeat(50), evil)).toBe(false);
   });
 });
 
@@ -95,13 +132,13 @@ describe('update-layout-blocks - selectBlocks', () => {
     expect(selected.map(block => block.pluginId)).not.toContain('ps_events_list_teaser');
   });
 
-  test('filters by label regex', () => {
-    const selected = selectBlocks(BLOCKS, { label: '- Sherrerd Hall$' });
+  test('filters by label text', () => {
+    const selected = selectBlocks(BLOCKS, { label: 'Sherrerd Hall' });
     expect(selected.map(block => block.uuid)).toEqual(['uuid-001', 'uuid-003']);
   });
 
   test('combines plugin and label filters', () => {
-    const selected = selectBlocks(BLOCKS, { plugin: 'ps_events_list_conference', label: '^001' });
+    const selected = selectBlocks(BLOCKS, { plugin: 'ps_events_list_conference', label: '001' });
     expect(selected.map(block => block.uuid)).toEqual(['uuid-001']);
   });
 
@@ -117,6 +154,10 @@ describe('update-layout-blocks - selectBlocks', () => {
 
   test('returns an empty list when nothing matches', () => {
     expect(selectBlocks(BLOCKS, { plugin: 'does_not_exist' })).toEqual([]);
+  });
+
+  test('a label filter of regex syntax matches nothing rather than throwing', () => {
+    expect(selectBlocks(BLOCKS, { label: '[unclosed' })).toEqual([]);
   });
 });
 
