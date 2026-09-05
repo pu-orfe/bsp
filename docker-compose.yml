@@ -4,9 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"   # API server
-      - "8080:8080"   # noVNC web interface
-      - "5900:5900"   # VNC server (optional direct access)
+      # Host ports are configurable: 3000 and 8080 collide with common dev
+      # tooling, and on macOS AirPlay Receiver holds 5000/7000. Set
+      # BSP_API_PORT / BSP_NOVNC_PORT / BSP_VNC_PORT in .env to move them.
+      - "${BSP_API_PORT:-3000}:3000"     # API server
+      - "${BSP_NOVNC_PORT:-8080}:8080"   # noVNC web interface
+      - "${BSP_VNC_PORT:-5900}:5900"     # VNC server (optional direct access)
     volumes:
       - ./storage:/app/storage  # Persistent browser contexts
       - ./tmp:/tmp               # Screenshots and artifacts
@@ -15,7 +18,7 @@ services:
     environment:
       - NODE_ENV=development
       - DISPLAY=:99
-      - NOVNC_URL=http://localhost:8080/vnc.html
+      - NOVNC_URL=http://localhost:${BSP_NOVNC_PORT:-8080}/vnc.html
       # BASE_URL and DEFAULT_LOGIN_URL are read from .env file
       # To override, set DEFAULT_LOGIN_URL=https://your-drupal-site.com/user/login in .env
     healthcheck:
