@@ -1,3 +1,3 @@
 [submodule "schemas/sites"]
 	path = schemas/sites
-	url = git@github.com:princeton-orfe/bsp-site-schemas.git
+	url = git@github.com:pu-orfe/bsp-site-schemas.git
